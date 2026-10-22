@@ -57,9 +57,12 @@ def run_checks(snapshots: dict, turns: list, persisted: dict) -> list[dict]:
     check("C6", "tools+text", "t5: read logs with a tool and found the new S3 AccessDenied error",
           bool(used & log_tools) and ("s3" in t5_text or "accessdenied" in t5_text), str(sorted(used)))
 
+    # Every line that mentions DBTimeout must also call it known, so it can't sit in the "new" list.
+    known_words = ("known", "backup", "expected", "ידוע", "גיבוי")
+    db_lines = [ln for ln in t5_text.splitlines() if "dbtimeout" in ln.replace(" ", "")]
+    bad_lines = [ln for ln in db_lines if not any(w in ln for w in known_words)]
     check("C7", "text", "t5: DBTimeout not reported as new (known issue from memory)",
-          "dbtimeout" not in t5_text.replace(" ", "") or any(w in t5_text for w in ("known", "backup", "ידוע")),
-          "")
+          not bad_lines, f"unexplained DBTimeout lines={len(bad_lines)}")
 
     nginx_reads = [c for c in t6["tool_calls"] if (c.get("input") or {}).get("file") == "nginx.log"]
     check("C8", "state+text", "t6: checkout incident answered from memory, without re-reading nginx.log",

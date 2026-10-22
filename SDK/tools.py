@@ -18,6 +18,9 @@ def _wrap(toolbox: Toolbox, spec: dict):
             return {"content": [{"type": "text", "text": fn(**args)}]}  # replaces: tools
         except (ToolError, TypeError) as e:
             return {"content": [{"type": "text", "text": f"error: {e}"}], "is_error": True}  # replaces: tools
+        except Exception as e:  # a bug in a tool must not kill the turn (same as API/harness/tools.py)
+            return {"content": [{"type": "text", "text": f"error: internal {type(e).__name__}: {e}"}],  # replaces: tools
+                    "is_error": True}
 
     return handler
 

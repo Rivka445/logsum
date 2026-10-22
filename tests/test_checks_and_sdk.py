@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from shared.checks import hebrew_ratio, run_checks
 from shared.log_tools import Toolbox
 from shared.memory_store import MemoryStore
@@ -34,11 +36,19 @@ def test_checks_fail_on_bad_state():
     assert not res["C4"] and not res["C5"] and not res["C10"]
 
 
+def test_c7_fails_when_dbtimeout_is_listed_as_new():
+    turns = [{**TURNS[0], "response": "New issues:\n- DBTimeout x10\n- S3 AccessDenied x6\nNothing else is known."},
+             *TURNS[1:]]
+    res = {c["id"]: c["pass"] for c in run_checks(GOOD, turns, {"s1": 8, "s2": 6})}
+    assert not res["C7"]
+
+
 def test_hebrew_ratio():
     assert hebrew_ratio("שלום world") > 0.3 and hebrew_ratio("hello") == 0
 
 
 def test_sdk_tool_wrappers_call_shared_and_flag_errors(ws):
+    pytest.importorskip("claude_agent_sdk")
     from SDK.tools import TOOL_IDS, _wrap
     from shared.schemas import TOOL_SPECS
 

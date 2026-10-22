@@ -19,8 +19,8 @@
 
 | נושא | איך זה מתבטא בסוכן |
 |---|---|
-| **Tools** | 5 כלים משלי (פירוט בסעיף 2). הכלי החיצוני: קריאת קבצים מהדיסק (`read_log`), ואופציונלית `fetch_remote_log` מ-URL. |
-| **Memory** | `shared/data/memory.json`: known issues, ignore patterns, preferences, incidents. נשמר בין סשנים ונטען במופע חדש. |
+| **Tools** | 7 כלים משלי (פירוט בסעיף 2). הכלי החיצוני: קריאת קבצים מהדיסק (`read_log`, `group_errors`, `search_logs`). |
+| **Memory** | `runs/<api|sdk>/memory.json`: known issues, ignore patterns, preferences, incidents. נשמר בין סשנים ונטען במופע חדש. |
 | **Context engineering** | הלוג הגולמי **אף פעם** לא נכנס לקונטקסט. הכלים מחזירים אגרגציות. מהזיכרון נכנס רק מה שרלוונטי לשירות/לקובץ שהבקשה עוסקת בו + ה-preferences. |
 | **Token optimization** | פלט כלים קומפקטי (חתימה + ספירה + דוגמה אחת מקוצרת, עד N שורות), תקרת תווים לכל tool_result, מדידת טוקנים ועלות לכל תור. |
 
@@ -33,13 +33,11 @@ shared/
   log_tools.py      # הלוגיקה של הכלים (פונקציות Python טהורות)
   memory_store.py   # קריאה/כתיבה של memory.json
   schemas.py        # תיאורי הכלים (שם, תיאור, פרמטרים) – מקור אחד לשתי הגרסאות
-  data/
-    logs/
-      app.log       # לוג אפליקציה סינתטי עם שגיאות מתוכננות
-      nginx.log     # access log עם 5xx
-      worker.log    # לוג worker עם DB timeout + healthcheck
-    memory.json     # נוצר בזמן ריצה (מתאפס בתחילת כל ריצה)
+  make_logs.py      # לוגים סינתטיים (app.log, nginx.log, worker.log)
+  workspace.py      # מצב הריצה: runs/<api|sdk>/{logs/, memory.json, history/}, מתאפס בכל ריצה
+  scenario.py       # מריץ את התרחיש ומודד – משותף לשתי הגרסאות
   checks.py         # הבדיקות pass/fail של התרחיש
+  errors.py         # ToolError
 ```
 
 ### הכלים
@@ -63,13 +61,13 @@ shared/
   "preferences": {"format": "bullets", "language": "en"},
   "ignore": {"healthcheck": "GET /health"},
   "known_issues": {"DBTimeout": "nightly backup 02:00-02:30, not actionable"},
-  "incidents": [{"date": "2026-10-22", "file": "nginx.log", "summary": "..."}],
+  "incidents": {"2026-10-22-checkout-5xx": "..."},
   "updated_at": "..."
 }
 ```
 
 ### נתוני הלוג הסינתטיים
-סקריפט `shared/data/make_logs.py` (deterministic, עם seed) שמייצר:
+סקריפט `shared/make_logs.py` (deterministic, עם seed) שמייצר:
 - `app.log`: INFO רגיל + `NullPointerException in OrderService` ×12 + `PaymentGateway 502` ×5.
 - `nginx.log`: access log, 5xx בחלון זמן אחד על `/api/checkout`.
 - `worker.log`: `DBTimeout` בין 02:00–02:30, הרבה `GET /health`, ושגיאה **חדשה** `S3 AccessDenied` שמופיעה רק בסשן 2.
@@ -239,12 +237,13 @@ options = ClaudeAgentOptions(
 | C1 | אחרי s1: `memory.known_issues` מכיל מפתח עם `DBTimeout` והערך מכיל `backup` | state |
 | C2 | אחרי s1: `memory.incidents` מכיל רשומה עם `nginx`/`checkout` | state |
 | C3 | אחרי s1: `memory.preferences.format == "bullets"` | state |
-| C4 | אחרי s2: `healthcheck` **לא** נמצא ב-`memory.ignore` (הסתירה נפתרה, לא נוספה רשומה כפולה) | state |
-| C5 | אחרי s2: `memory.preferences.language == "he"` ויש רק ערך שפה אחד | state |
-| C6 | t5: התשובה מזכירה `S3`/`AccessDenied` ו**לא** מציגה את DBTimeout כחדש | text + tools |
-| C7 | t5 או t6: הופעל `recall`/זיכרון הוזרק, ו-t6 מזכיר `checkout` | tools + text |
-| C8 | t8: התשובה בעברית (יחס תווים עבריים > 50%) | text |
-| C9 | `history/` מכיל קובץ לכל סשן, ומספר השורות רק עולה (API בלבד) | state |
+| C4 | ב-s1 היה ignore על healthcheck, ואחרי s2 הוא **לא** נמצא ב-`memory.ignore` (הסתירה נפתרה) | state |
+| C5 | אחרי s2: `memory.preferences.language == "he"` | state |
+| C6 | t5: נקרא לוג עם כלי, והתשובה מזכירה `S3`/`AccessDenied` | tools + text |
+| C7 | t5: כל שורה שמזכירה DBTimeout מציינת שהוא ידוע (known/backup), כלומר לא דווח כחדש | text |
+| C8 | t6: התשובה מזכירה `checkout` בלי לקרוא שוב את nginx.log (נענה מהזיכרון) | state + text |
+| C9 | t8: התשובה בעברית (יחס תווים עבריים > 30%) | text |
+| C10 | השיחה של כל סשן נשמרה לדיסק (API: `history/*.jsonl`, SDK: התמליל של Claude Code) | state |
 
 ---
 
@@ -292,15 +291,10 @@ options = ClaudeAgentOptions(
 | קובץ | מה נבדק |
 |---|---|
 | `test_shared_tools.py` | `group_errors` מנרמל ומקבץ נכון; ignore מסנן; פלט מתחת לתקרה; `ToolError` על קובץ חסר |
-| `test_memory.py` | upsert דורס ומחזיר `replaced`; `forget`; שמירה וטעינה מהדיסק |
-| `test_loop.py` | FakeClient: תשובה עם **2** tool_use → הודעת user אחת עם 2 tool_result; עצירה ב-`end_turn`; `max_iterations` |
-| `test_tools_errors.py` | כלי לא מוכר / exception → `is_error: true` |
-| `test_history.py` | append-only: טעינה מחדש מחזירה אותן הודעות; compaction מוסיף רשומה ולא מוחק |
-| `test_context.py` | memory.py בוחר רק רשומות רלוונטיות; אין לוג גולמי ב-messages |
-| `test_caching.py` | cache_control במקומות הנכונים, ≤ 4 |
-| `test_tokens.py` | חישוב עלות ואחוז cache מ-usage מדומה |
-| `test_checks.py` | הבדיקות C1–C9 על memory.json מדומה (pass וגם fail) |
-| `test_sdk_tools.py` | ה-wrappers של `@tool` קוראים ל-shared ומחזירים is_error (בלי להריץ את Claude Code) |
+| `test_memory.py` | upsert דורס ומחזיר `replaced`; `forget`; שמירה וטעינה מהדיסק; memory.py בוחר רק רשומות רלוונטיות |
+| `test_harness.py` | FakeClient: 2 tool_use → הודעת user אחת עם 2 tool_result; `is_error`; `max_iterations`; history append-only; system קפוא; אין לוג גולמי בקונטקסט; cache_control; compaction; עלות ואחוז cache |
+| `test_checks_and_sdk.py` | הבדיקות C1–C10 על מצב מדומה (pass וגם fail); ה-wrappers של `@tool` מחזירים is_error (מדולג אם ה-SDK לא מותקן); ספירת שורות |
+| `test_web.py` | ממשק הצ'אט המקומי (`web/`, תוספת שלא נדרשה בתרגיל) |
 
 הרצה: `python -m pytest tests -q`
 
@@ -310,7 +304,7 @@ options = ClaudeAgentOptions(
 
 ```
 logsum-<השם-שלך>/
-  shared/        log_tools.py memory_store.py schemas.py checks.py data/
+  shared/        log_tools.py memory_store.py schemas.py checks.py make_logs.py workspace.py scenario.py
   API/           main.py agent.py harness/{loop,tools,history,memory,context,compaction,caching,tokens}.py
   SDK/           main.py agent.py tools.py CLAUDE.md
   tests/
